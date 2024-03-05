@@ -2478,7 +2478,7 @@ libcrun_container_run_internal (libcrun_container_t *container, libcrun_context_
         goto fail;
     }
 
-  ret = libcrun_cgroup_enter (&cg, &cgroup_status, err);
+  ret = libcrun_cgroup_enter (&cg, &cgroup_status, err);  // TODO: update cgroup v2 resources through bpf map
   if (UNLIKELY (ret < 0))
     goto fail;
 

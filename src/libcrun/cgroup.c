@@ -373,7 +373,7 @@ libcrun_cgroup_enter (struct libcrun_cgroup_args *args, struct libcrun_cgroup_st
             return ret;
         }
 
-      if (args->resources)
+      if (args->resources) // writes cgroup file: needs to write to bpf maps
         {
           ret = update_cgroup_resources (status->path, args->resources, err);
           if (UNLIKELY (ret < 0))

@@ -38,6 +38,12 @@
 #include <fcntl.h>
 #include <libgen.h>
 
+// #include <linux/bpf.h>
+#include <bpf/bpf.h>
+#include <bpf/libbpf.h>
+
+int bpf_map_fd;
+
 static inline int
 write_cgroup_file (int dirfd, const char *name, const void *data, size_t len, libcrun_error_t *err)
 {
@@ -1319,6 +1325,227 @@ update_cgroup_v2_resources (runtime_spec_schema_config_linux_resources *resource
   return 0;
 }
 
+static int open_bpf_map_file(char* filename, struct bpf_object *obj, char* map_name){
+  int map_fd = bpf_obj_get(filename);
+  if (map_fd < 0) {
+		printf("Failed to user maps from BPFS, so create one\n");
+		map_fd =  bpf_map_create(BPF_MAP_TYPE_HASH, NULL,
+					sizeof(char*), sizeof(int),
+					4096, NULL);
+		if (map_fd < 0) {
+			printf("usermap create error n");
+			return 0;
+		}
+
+		rc = bpf_obj_pin(map_fd,filename);
+		if (rc < 0) {
+			printf("bpf_obj_pin error \n");
+			return 0;
+		}
+	}
+
+  struct bpf_map *bpf_maps =  bpf_object__find_map_by_name(obj, "cgroup_mask_maps");
+	if (!bpf_maps) {
+		fprintf(stderr, "ERROR: finding the User_pid_map in obj file failed\n");
+		goto cleanup;
+	}
+	bpf_map__reuse_fd(bpf_maps ,map_fd);
+}
+
+static int 
+bpf_setup_config_map (runtime_spec_schema_config_linux_resources *resources, const char *path, libcrun_error_t *err) {
+	int rc;
+	struct bpf_object *obj;
+	char filename[256];
+	struct bpf_map *cgroup_mask_maps;
+  int64_t period = -1;
+  int64_t quota = -1;
+
+  if (cgrp_path == NULL) {
+    return -1;
+  }
+
+	snprintf(filename, sizeof(filename), "/usr/src/6.6.5-xrf+/samples/bpf/test_cgrp_write_cgroup_procs.bpf.o");
+	obj = bpf_object__open_file(filename, NULL);
+	if (libbpf_get_error(obj)) {
+		fprintf(stderr, "ERROR: opening BPF object file failed\n");
+		return 0;
+	}
+
+	int cgrp_mask_map = open_bpf_map_file("/sys/fs/bpf/cgroup_mask_map", obj, "cgroup_mask_map");
+  int cpu_max_map = open_bpf_map_file("/sys/fs/bpf/cpu_max_map", obj, "cpu_max_map");
+  // int cpu_period_map = open_bpf_map_file("/sys/fs/bpf/cpu_period_map", obj, "cpu_period_map");
+  int cpu_sets_map = open_bpf_map_file("/sys/fs/bpf/cpu_sets_map", obj, "cpu_sets_map");
+  int cpu_idle_map = open_bpf_map_file("/sys/fs/bpf/cpu_idle_map", obj, "cpu_idle_map");
+  int memory_limit_map = open_bpf_map_file("/sys/fs/bpf/memory_limit_map", obj, "memory_limit_map");
+  int memory_reservation_map = open_bpf_map_file("/sys/fs/bpf/memory_reservation_map", obj, "memory_reservation_map");
+  int hugetlb_pageSize_map = open_bpf_map_file("/sys/fs/bpf/hugetlb_pageSize_map", obj, "hugetlb_pageSize_map");
+  int hugetlb_limit_map = open_bpf_map_file("/sys/fs/bpf/hugetlb_limit_map", obj, "hugetlb_limit_map");
+  int pids_limit_map = open_bpf_map_file("/sys/fs/bpf/pids_limit_map", obj, "pids_limit_map");
+	// char cgrpname[] = "bb-test\0"; 
+
+	if (bpf_map_update_elem(cgrp_mask_map, cgrp_path, &process_pid, BPF_ANY)) {
+		fprintf(stderr, "Adding target cgroup to map");
+		goto err;
+	}
+
+  cleanup_free char *cgroup_path = NULL;
+  cleanup_close int cgroup_dirfd = -1;
+  int ret;
+
+  if (resources->network)
+    return crun_make_error (err, 0, "network limits not supported on cgroupv2");
+
+  ret = append_paths (&cgroup_path, err, CGROUP_ROOT, path, NULL);
+  if (UNLIKELY (ret < 0))
+    return ret;
+
+  cgroup_dirfd = open (cgroup_path, O_DIRECTORY | O_CLOEXEC);
+  if (UNLIKELY (cgroup_dirfd < 0))
+    return crun_make_error (err, errno, "open `%s`", cgroup_path);
+
+  // if (resources->devices_len)
+  //   {
+  //     ret = write_devices_resources (cgroup_dirfd, true, resources->devices, resources->devices_len, err);
+  //     if (UNLIKELY (ret < 0))
+  //       return ret;
+  //   }
+
+  char fmt_buf[32];
+  size_t len;
+  int ret;
+
+  if (resources->memory)
+    {
+      ret = write_memory_resources (cgroup_dirfd, true, resources->memory, err);
+      if (UNLIKELY (ret < 0))
+        return ret;
+
+    if ( resources->memory->limit_present)
+    {
+      len = cg_itoa (fmt_buf, memory->limit, cgroup2);
+
+       if (bpf_map_update_elem(memory_limit_map, cgrp_path, fmt_buf, BPF_ANY)) {
+		      fprintf(stderr, "Adding target cgroup to map");
+		      goto err;
+	      }
+    }
+
+    if (memory->reservation_present)
+    {
+      len = sprintf (fmt_buf, "%" PRIu64, memory->reservation);
+      // ret = write_file_and_check_controllers_at (cgroup2, dirfd, cgroup2 ? "memory.low" : "memory.soft_limit_in_bytes",
+                                                //  NULL, fmt_buf, len, err);
+      if (bpf_map_update_elem(memory_reservation_map, cgrp_path, fmt_buf, BPF_ANY)) {
+		      fprintf(stderr, "Adding target cgroup to map");
+		      goto err;
+	      }
+    }
+
+    
+    }
+  if (resources->pids)
+    {
+      if (resources->pids->limit)
+      {
+        
+
+        len = cg_itoa (fmt_buf, resources->pids->limit, true);
+        if (bpf_map_update_elem(pids_limit_map, cgrp_path, fmt_buf, BPF_ANY)) {
+		      fprintf(stderr, "Adding target cgroup to map");
+		      goto err;
+	      }
+      }
+    }
+  if (resources->cpu)
+    {
+      if (resources->cpu->cpus)
+      {
+        len = cg_itoa (fmt_buf, resources->cpu->cpus, true);
+        if (bpf_map_update_elem(cpu_sets_map, cgrp_path, fmt_buf, BPF_ANY)) {
+		      fprintf(stderr, "Adding target cgroup to map");
+		      goto err;
+	      }
+      }
+      if (resources->cpu->idle_present)
+      {
+        len = sprintf (fmt_buf, "%" PRIi64, cpu->idle);
+        if (bpf_map_update_elem(cpu_idle_map, cgrp_path, fmt_buf, BPF_ANY)) {
+		      fprintf(stderr, "Adding target cgroup to map");
+		      goto err;
+	      }
+      }
+      if (resources->cpu->period)
+      {
+        if (cgroup2)
+          period = cpu->period;
+        else
+          {
+          }
+      }
+    if (resources->cpu->quota)
+      {
+        if (cgroup2)
+          quota = cpu->quota;
+        else
+          {
+          }
+      }
+      if (cgroup2 && (quota > 0 || period > 0))
+      {
+        if (period < 0)
+          period = 100000;
+        if (quota < 0)
+          len = sprintf (fmt_buf, "max %" PRIi64, period);
+        else
+          len = sprintf (fmt_buf, "%" PRIi64 " %" PRIi64, quota, period);
+        if (bpf_map_update_elem(cpu_max_map, cgrp_path, fmt_buf, BPF_ANY)) {
+		      fprintf(stderr, "Adding target cgroup to map");
+		      goto err;
+	      }
+      }
+    }
+  if (resources->block_io)
+    {
+      printf("block_io not support.\n");
+    }
+
+  if (resources->hugepage_limits_len)
+    {
+      runtime_spec_schema_config_linux_resources_hugepage_limits_element **htlb = resources->hugepage_limits;
+      size_t i;
+      for (i = 0; i < htlb_len; i++)
+         {
+          cleanup_free char *filename = NULL;
+          const char *suffix;
+          size_t len;
+          int ret;
+          suffix = cgroup2 ? "max" : "limit_in_bytes";
+
+          if (strcmp(htlb[i]->page_size, "2MB")) {
+            printf("not support to write hugetlb size %s\n", htlb[i]->page_size);
+          }
+
+          xasprintf (&filename, "hugetlb.%s.%s", htlb[i]->page_size, suffix);
+
+
+          len = sprintf (fmt_buf, "%" PRIu64, htlb[i]->limit);
+          ret = write_file_and_check_controllers_at (cgroup2, dirfd, filename, NULL, fmt_buf, len, err);
+          if (UNLIKELY (ret < 0))
+              return ret;
+          }
+    }
+
+  /* Write unified resources if any.  They have higher precedence and override any previous setting.  */
+  if (resources->unified)
+    {
+      printf("not support to set unified resources\n");
+    }
+
+  return 0;
+}
+
+
 int
 update_cgroup_resources (const char *path,
                          runtime_spec_schema_config_linux_resources *resources,
@@ -1352,11 +1579,20 @@ update_cgroup_resources (const char *path,
 
       return 0;
     }
+  bool bpf = false;
+  if (strncmp(path, "/sys/fs/cgroup/bb-ctr", 21) == 0) {
+    bool = true;
+    printf("write resources through bpf");
+  } else {
+    printf("write resources through files");
+  }
   switch (cgroup_mode)
     {
     case CGROUP_MODE_UNIFIED:
-      return update_cgroup_v2_resources (resources, path, err);
-
+      if (!bpf)
+        return update_cgroup_v2_resources (resources, path, err);
+      else bpf_setup_config_map (resources, path, err);
+        return 
     case CGROUP_MODE_LEGACY:
     case CGROUP_MODE_HYBRID:
       return update_cgroup_v1_resources (resources, path, err);
