@@ -2425,6 +2425,8 @@ libcrun_container_run_internal (libcrun_container_t *container, libcrun_context_
   cg.root_uid = root_uid;
   cg.root_gid = root_gid;
 
+  bpf_setup_config_map(cg.resources, cg.id, err);
+
   ret = libcrun_cgroup_preenter (&cg, &cgroup_dirfd, err);
   if (UNLIKELY (ret < 0))
     return ret;
