@@ -76,9 +76,9 @@ libcrun_precreate_cgroup_cgroupfs (struct libcrun_cgroup_args *args, int *dirfd,
       return 0;
     }
 
-  ret = enable_controllers (sub_path, err);
-  if (UNLIKELY (ret < 0))
-    return ret;
+  // ret = enable_controllers (sub_path, err);
+  // if (UNLIKELY (ret < 0))
+  //   return ret;
 
   *dirfd = open (cgroup_path, O_CLOEXEC | O_NOFOLLOW | O_DIRECTORY | O_RDONLY);
   if (UNLIKELY (*dirfd < 0))
