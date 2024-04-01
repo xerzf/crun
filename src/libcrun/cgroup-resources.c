@@ -1330,8 +1330,8 @@ static int open_bpf_map_file(char* filename, struct bpf_object *obj, char* map_n
   int rc;
   if (map_fd < 0) {
 		printf("Failed to user maps from BPFS, so create one\n");
-		map_fd =  bpf_map_create(BPF_MAP_TYPE_LRU_HASH, map_name,
-					sizeof(char*), value_size,
+		map_fd =  bpf_map_create(BPF_MAP_TYPE_HASH, NULL,
+					sizeof(__u32), value_size,
 					4096, NULL);
 		if (map_fd < 0) {
 			printf("usermap create error n");
@@ -1345,12 +1345,18 @@ static int open_bpf_map_file(char* filename, struct bpf_object *obj, char* map_n
 		}
 	}
 
-  // struct bpf_map *bpf_maps =  bpf_object__find_map_by_name(obj, map_name);
-	// if (!bpf_maps) {
-	// 	fprintf(stderr, "ERROR: finding the User_pid_map in obj file failed\n");
-	// }
-	// bpf_map__reuse_fd(bpf_maps ,map_fd);
   return map_fd;
+}
+
+static unsigned int djb2_hash(const unsigned char *str)
+{
+    unsigned int hash = 5381;
+    int c;
+
+    while ((c = *str++) != 0)
+        hash = ((hash << 5) + hash) + c; // hash * 33 + c
+
+    return hash;
 }
 
 int 
@@ -1361,8 +1367,11 @@ bpf_setup_config_map (runtime_spec_schema_config_linux_resources *resources, con
 	struct bpf_map *cgroup_mask_maps;
   int64_t period = -1;
   int64_t quota = -1;
-  __u64 cgrp_mask = 1;
-  printf("set bpf map for %s\n", path);
+  __u64 cgrp_mask = 0;
+  __u32 hash_key = djb2_hash(path);
+  // printf("set bpf map for %s, hash key is %d\n", path, hash_key);
+  // char *path = calloc(32, sizeof(char));
+  // sprintf(path, "%s", name);
 
 	// snprintf(filename, sizeof(filename), "/home/ubuntu/cgroup-kernel/samples/bpf/cgroup_resources.bpf.o");
 	// obj = bpf_object__open_file(filename, NULL);
@@ -1370,30 +1379,6 @@ bpf_setup_config_map (runtime_spec_schema_config_linux_resources *resources, con
 	// 	fprintf(stderr, "ERROR: opening BPF object file failed\n");
 	// 	return 0;
 	// }
-
-	int cgrp_mask_map = open_bpf_map_file("/sys/fs/bpf/cgrp_mask_map", obj, "cgrp_mask_map", sizeof(__u64));
-  printf("cgrp_mask_map fd is %d\n", cgrp_mask_map);
-  int cpu_max_map = open_bpf_map_file("/sys/fs/bpf/cpu_max_map", obj, "cpu_max_map", sizeof(char[32]));
-  printf("cpu_max_map fd is %d\n", cpu_max_map);
-  // int cpu_period_map = open_bpf_map_file("/sys/fs/bpf/cpu_period_map", obj, "cpu_period_map");
-  int cpu_sets_map = open_bpf_map_file("/sys/fs/bpf/cpu_sets_map", obj, "cpu_sets_map", sizeof(char[32]));
-  int cpu_idle_map = open_bpf_map_file("/sys/fs/bpf/cpu_idle_map", obj, "cpu_idle_map", sizeof(long long));
-  int memory_limit_map = open_bpf_map_file("/sys/fs/bpf/memory_limit_map", obj, "memory_limit_map", sizeof(char[32]));
-  int memory_reservation_map = open_bpf_map_file("/sys/fs/bpf/memory_reser_map", obj, "memory_reser_map", sizeof(char[32]));
-  // int hugetlb_pageSize_map = open_bpf_map_file("/sys/fs/bpf/hugetlb_pageSize_map", obj, "hugetlb_pageSize_map");
-  int hugetlb_2MB_map = open_bpf_map_file("/sys/fs/bpf/hugetlb_2MB_map", obj, "hugetlb_2MB_map", sizeof(char[32]));
-  int pids_limit_map = open_bpf_map_file("/sys/fs/bpf/pids_limit_map", obj, "pids_limit_map", sizeof(char[32]));
-	// char cgrpname[] = "bb-test\0"; 
-
-  
-
-
-	if (bpf_map_update_elem(cgrp_mask_map, path, &cgrp_mask, BPF_ANY) != 0) {
-		fprintf(stderr, "Adding key to cgrp_mask_map error.\n");
-	}
-
-  // cleanup_free char *cgroup_path = NULL;
-  // cleanup_close int cgroup_dirfd = -1;
 
   if (resources->network)
     return crun_make_error (err, 0, "network limits not supported on cgroupv2");
@@ -1424,10 +1409,13 @@ bpf_setup_config_map (runtime_spec_schema_config_linux_resources *resources, con
       if ( resources->memory->limit_present)
       {
         len = cg_itoa (fmt_buf, resources->memory->limit, true);
-        printf("memory_limit_map limits: %s\n", fmt_buf);
-        if (bpf_map_update_elem(memory_limit_map, path, fmt_buf, BPF_ANY) != 0) {  
+        // printf("memory_limit_map limits: %s\n", fmt_buf);
+        cgrp_mask = 1;
+        int memory_limit_map = open_bpf_map_file("/sys/fs/bpf/memory_limit_map", obj, "memory_limit_map", sizeof(char[32]));
+        while (bpf_map_update_elem(memory_limit_map, &hash_key, fmt_buf, BPF_ANY) != 0) {  
             fprintf(stderr, "Adding key to memory_limit_map error.\n");
           }
+        close(memory_limit_map);
       }
 
       if (resources->memory->reservation_present)
@@ -1435,43 +1423,49 @@ bpf_setup_config_map (runtime_spec_schema_config_linux_resources *resources, con
         len = sprintf (fmt_buf, "%" PRIu64, resources->memory->reservation);
         // ret = write_file_and_check_controllers_at (cgroup2, dirfd, cgroup2 ? "memory.low" : "memory.soft_limit_in_bytes",
                                                   //  NULL, fmt_buf, len, err);
-        printf("memory_reservation_map limits: %s\n", fmt_buf);
-        if (bpf_map_update_elem(memory_reservation_map, path, fmt_buf, BPF_ANY) != 0) {
+        // printf("memory_reservation_map limits: %s\n", fmt_buf);
+        int memory_reservation_map = open_bpf_map_file("/sys/fs/bpf/memory_reser_map", obj, "memory_reser_map", sizeof(char[32]));
+        while (bpf_map_update_elem(memory_reservation_map, &hash_key, fmt_buf, BPF_ANY) != 0) {
             fprintf(stderr, "Adding key to memory_reservation_map error.\n");
           }
+        close(memory_reservation_map);
       }
-
-    
     }
   if (resources->pids)
     {
       if (resources->pids->limit)
       {
         len = cg_itoa (fmt_buf, resources->pids->limit, true);
-        printf("pids_limit_map limits: %s\n", fmt_buf);
-        if (bpf_map_update_elem(pids_limit_map, path, fmt_buf, BPF_ANY) != 0) {
+        // printf("pids_limit_map limits: %s\n", fmt_buf);
+         int pids_limit_map = open_bpf_map_file("/sys/fs/bpf/pids_limit_map", obj, "pids_limit_map", sizeof(char[32]));
+        while (bpf_map_update_elem(pids_limit_map, &hash_key, fmt_buf, BPF_ANY) != 0) {
 		      fprintf(stderr, "Adding key to pids_limit_map error.\n");
 	      }
+        close(pids_limit_map);
       }
     }
   if (resources->cpu)
     {
       if (resources->cpu->cpus)
       {
+        int cpu_sets_map = open_bpf_map_file("/sys/fs/bpf/cpu_sets_map", obj, "cpu_sets_map", sizeof(char[32]));
         // len = cg_itoa (fmt_buf, resources->cpu->cpus, true);
         len = sprintf (fmt_buf, "%s" , resources->cpu->cpus);
-        printf("cpu_cpus_map limits: %s,\n", fmt_buf);
-        if (bpf_map_update_elem(cpu_sets_map, path, fmt_buf, BPF_ANY) != 0) {
+        // printf("cpu_cpus_map limits: %s,\n", fmt_buf);
+        while (bpf_map_update_elem(cpu_sets_map, &hash_key, fmt_buf, BPF_ANY) != 0) {
 		      fprintf(stderr, "Adding key to cpu_sets_map error.\n");
 	      }
+        close(cpu_sets_map);
       }
       if (resources->cpu->idle_present)
       {
+        int cpu_idle_map = open_bpf_map_file("/sys/fs/bpf/cpu_idle_map", obj, "cpu_idle_map", sizeof(long long));
         // len = sprintf (fmt_buf, "%" PRIi64, resources->cpu->idle);
-        printf("cpu_idle_map limits: %lld\n", resources->cpu->idle);
-        if (bpf_map_update_elem(cpu_idle_map, path, &resources->cpu->idle, BPF_ANY) != 0) {
+        // printf("cpu_idle_map limits: %lld\n", resources->cpu->idle);
+        while (bpf_map_update_elem(cpu_idle_map, &hash_key, &resources->cpu->idle, BPF_ANY) != 0) {
 		      fprintf(stderr, "Adding key to cpu_idle_map error.\n");
 	      }
+        close(cpu_idle_map);
       }
       if (resources->cpu->period)
       {
@@ -1498,10 +1492,12 @@ bpf_setup_config_map (runtime_spec_schema_config_linux_resources *resources, con
         else
           // len = sprintf (fmt_buf, "%" PRIi64 "__%" PRIi64, quota, period);
           len = sprintf (fmt_buf, "%d %d", quota, period);
-        printf("cpu_max_map limits: %s,\n", fmt_buf);
-        if (bpf_map_update_elem(cpu_max_map, path, fmt_buf, BPF_ANY) != 0) {
+        // printf("cpu_max_map limits: %s,\n", fmt_buf);
+        int cpu_max_map = open_bpf_map_file("/sys/fs/bpf/cpu_max_map", obj, "cpu_max_map", sizeof(char[32]));
+        while (bpf_map_update_elem(cpu_max_map, &hash_key, fmt_buf, BPF_ANY) != 0) {
 		      fprintf(stderr, "Adding key to cpu_max_map error.\n");
 	      }
+        close(cpu_max_map);
       }
     }
   if (resources->block_io)
@@ -1528,31 +1524,27 @@ bpf_setup_config_map (runtime_spec_schema_config_linux_resources *resources, con
           // xasprintf (&filename, "hugetlb.%s.%s", htlb[i]->page_size, suffix);
           
           len = sprintf (fmt_buf, "%" PRIu64, htlb[i]->limit);
-          printf("huge table 2MB limits: %s\n", fmt_buf);
-          if (bpf_map_update_elem(hugetlb_2MB_map, path, fmt_buf, BPF_ANY) != 0) {
+          // printf("huge table 2MB limits: %s\n", fmt_buf);
+          int hugetlb_2MB_map = open_bpf_map_file("/sys/fs/bpf/hugetlb_2MB_map", obj, "hugetlb_2MB_map", sizeof(char[32]));
+          while (bpf_map_update_elem(hugetlb_2MB_map, &hash_key, fmt_buf, BPF_ANY) != 0) {
             fprintf(stderr, "Adding key to hugetlb_2MB_map error.\n");
           }
-
+          close(hugetlb_2MB_map);
         }
     }
-
+  if (cgrp_mask!=0) {
+    int cgrp_mask_map = open_bpf_map_file("/sys/fs/bpf/cgrp_mask_map", obj, "cgrp_mask_map", sizeof(__u64));
+	  while (bpf_map_update_elem(cgrp_mask_map, &hash_key, &cgrp_mask, BPF_ANY) != 0) {
+		  fprintf(stderr, "Adding key to cgrp_mask_map error.\n");
+	  }
+    close(cgrp_mask_map);
+  }
+  
   /* Write unified resources if any.  They have higher precedence and override any previous setting.  */
   if (resources->unified)
     {
       printf("not support to set unified resources\n");
     }
-
-  // if (obj)
-	// 	bpf_object__close(obj);
-
-  close(cgrp_mask_map);
-  close(cpu_max_map);
-  close(cpu_sets_map);
-  close(cpu_idle_map);
-  close(memory_limit_map);
-  close(memory_reservation_map);
-  close(hugetlb_2MB_map);
-  close(pids_limit_map);
 
   return 0;
 }
